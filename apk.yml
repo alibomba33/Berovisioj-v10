@@ -1,0 +1,991 @@
+name: apk
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Projeyi olustur
+        run: |
+          rm -rf app buildSrc gradle settings.gradle settings.gradle.kts build.gradle build.gradle.kts gradle.properties local.properties
+          cat > settings.gradle.kts <<'EOFKT'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VRBoxAR"
+          include(":app")
+          EOFKT
+          cat > build.gradle.kts <<'EOFKT'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOFKT
+          cat > gradle.properties <<'EOFKT'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          EOFKT
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOFKT'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.vrbox.arhands"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.vrbox.arhands"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  ndk {
+                      abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+              androidResources {
+                  noCompress += "task"
+              }
+          }
+
+          dependencies {
+              implementation("com.google.ar:core:1.45.0")
+              implementation("com.google.mediapipe:tasks-vision:0.10.14")
+          }
+          EOFKT
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOFKT'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
+              <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="VR Box AR"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+                  <meta-data android:name="com.google.ar.core" android:value="required" />
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOFKT
+          mkdir -p app/src/main/java/com/vrbox/arhands
+          cat > app/src/main/java/com/vrbox/arhands/MainActivity.kt <<'EOFKT'
+          package com.vrbox.arhands
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.pm.PackageManager
+          import android.opengl.GLSurfaceView
+          import android.os.Bundle
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.Toast
+          import com.google.ar.core.ArCoreApk
+          import com.google.ar.core.Config
+          import com.google.ar.core.Session
+
+          class MainActivity : Activity() {
+              var session: Session? = null
+              private lateinit var glView: GLSurfaceView
+              private lateinit var renderer: ArRenderer
+              private var installRequested = false
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  glView = GLSurfaceView(this)
+                  glView.preserveEGLContextOnPause = true
+                  glView.setEGLContextClientVersion(2)
+                  glView.setEGLConfigChooser(8, 8, 8, 8, 16, 0)
+                  renderer = ArRenderer(this)
+                  glView.setRenderer(renderer)
+                  glView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                  glView.setOnTouchListener { _, e ->
+                      if (e.action == MotionEvent.ACTION_DOWN) renderer.onTap(e.x, e.y)
+                      true
+                  }
+                  setContentView(glView)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (session == null) {
+                      try {
+                          val status = ArCoreApk.getInstance().requestInstall(this, !installRequested)
+                          if (status == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
+                              installRequested = true
+                              return
+                          }
+                          if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                              requestPermissions(arrayOf(Manifest.permission.CAMERA), 1)
+                              return
+                          }
+                          val s = Session(this)
+                          val cfg = Config(s)
+                          cfg.focusMode = Config.FocusMode.AUTO
+                          s.configure(cfg)
+                          session = s
+                      } catch (e: Exception) {
+                          Toast.makeText(this, "ARCore başlatılamadı: " + e.message, Toast.LENGTH_LONG).show()
+                          finish()
+                          return
+                      }
+                  }
+                  try {
+                      session?.resume()
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Kamera açılamadı: " + e.message, Toast.LENGTH_LONG).show()
+                      finish()
+                      return
+                  }
+                  glView.onResume()
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  glView.onPause()
+                  session?.pause()
+              }
+
+              override fun onDestroy() {
+                  renderer.tracker.close()
+                  session?.close()
+                  session = null
+                  super.onDestroy()
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (grantResults.isEmpty() || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+                      Toast.makeText(this, "Kamera izni gerekli", Toast.LENGTH_LONG).show()
+                      finish()
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              override fun onWindowFocusChanged(hasFocus: Boolean) {
+                  super.onWindowFocusChanged(hasFocus)
+                  if (hasFocus) {
+                      window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                          or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          or View.SYSTEM_UI_FLAG_FULLSCREEN
+                          or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+                  }
+              }
+          }
+          EOFKT
+          mkdir -p app/src/main/java/com/vrbox/arhands
+          cat > app/src/main/java/com/vrbox/arhands/HandTracker.kt <<'EOFKT'
+          package com.vrbox.arhands
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.ImageFormat
+          import android.graphics.Rect
+          import android.graphics.YuvImage
+          import android.media.Image
+          import android.os.SystemClock
+          import com.google.mediapipe.framework.image.BitmapImageBuilder
+          import com.google.mediapipe.tasks.core.BaseOptions
+          import com.google.mediapipe.tasks.vision.core.RunningMode
+          import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+          import java.io.ByteArrayOutputStream
+          import java.util.concurrent.Executors
+          import java.util.concurrent.atomic.AtomicBoolean
+
+          /** MediaPipe el takibi. Sonuçlar kamera görüntüsüne göre normalize (0..1) x,y çiftleridir (21 nokta = 42 float). */
+          class HandTracker(context: Context) {
+              @Volatile var hands: List<FloatArray> = emptyList()
+              @Volatile var lastMs: Long = 0L
+              @Volatile var error: String? = null
+
+              private val busy = AtomicBoolean(false)
+              private val exec = Executors.newSingleThreadExecutor()
+              private var landmarker: HandLandmarker? = null
+
+              init {
+                  try {
+                      val base = BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build()
+                      val opts = HandLandmarker.HandLandmarkerOptions.builder()
+                          .setBaseOptions(base)
+                          .setRunningMode(RunningMode.IMAGE)
+                          .setNumHands(2)
+                          .build()
+                      landmarker = HandLandmarker.createFromOptions(context, opts)
+                  } catch (t: Throwable) {
+                      error = "El modeli yüklenemedi"
+                  }
+              }
+
+              fun idle(): Boolean = landmarker != null && !busy.get()
+
+              fun submit(bmp: Bitmap) {
+                  val lm = landmarker
+                  if (lm == null || !busy.compareAndSet(false, true)) {
+                      bmp.recycle()
+                      return
+                  }
+                  exec.execute {
+                      try {
+                          val res = lm.detect(BitmapImageBuilder(bmp).build())
+                          val out = ArrayList<FloatArray>()
+                          for (hand in res.landmarks()) {
+                              if (hand.size < 21) continue
+                              val a = FloatArray(42)
+                              for (i in 0 until 21) {
+                                  a[2 * i] = hand[i].x()
+                                  a[2 * i + 1] = hand[i].y()
+                              }
+                              out.add(a)
+                          }
+                          hands = out
+                          if (out.isNotEmpty()) lastMs = SystemClock.uptimeMillis()
+                      } catch (t: Throwable) {
+                          error = "El takibi hatası"
+                      } finally {
+                          bmp.recycle()
+                          busy.set(false)
+                      }
+                  }
+              }
+
+              fun close() {
+                  exec.shutdown()
+                  try { landmarker?.close() } catch (t: Throwable) { }
+              }
+          }
+
+          /** ARCore YUV_420_888 kamera karesini Bitmap'e çevirir. */
+          fun yuvToBitmap(image: Image): Bitmap? {
+              val w = image.width
+              val h = image.height
+              val planes = image.planes
+              val yBuf = planes[0].buffer
+              val uBuf = planes[1].buffer
+              val vBuf = planes[2].buffer
+              val yRow = planes[0].rowStride
+              val uvRow = planes[2].rowStride
+              val uvPix = planes[2].pixelStride
+              val nv21 = ByteArray(w * h * 3 / 2)
+              for (r in 0 until h) {
+                  yBuf.position(r * yRow)
+                  yBuf.get(nv21, r * w, w)
+              }
+              var o = w * h
+              for (r in 0 until h / 2) {
+                  for (c in 0 until w / 2) {
+                      val i = r * uvRow + c * uvPix
+                      nv21[o++] = vBuf.get(i)
+                      nv21[o++] = uBuf.get(i)
+                  }
+              }
+              val yuv = YuvImage(nv21, ImageFormat.NV21, w, h, null)
+              val bos = ByteArrayOutputStream()
+              yuv.compressToJpeg(Rect(0, 0, w, h), 80, bos)
+              val bytes = bos.toByteArray()
+              return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+          }
+          EOFKT
+          mkdir -p app/src/main/java/com/vrbox/arhands
+          cat > app/src/main/java/com/vrbox/arhands/Items.kt <<'EOFKT'
+          package com.vrbox.arhands
+
+          import kotlin.math.PI
+          import kotlin.math.cos
+          import kotlin.math.sin
+
+          /** Yerel koordinat: x sağ, y parmak yönü, birim = avuç uzunluğu. */
+          class Poly(val pts: FloatArray, val color: Int)
+          class Item(val name: String, val parts: List<Poly>, val tip: Float, val flash: Int)
+          class Category(val name: String, val color: Int, val items: List<Item>)
+
+          private fun c(v: Long): Int = v.toInt()
+
+          private val STEEL = c(0xFFC9D1D9)
+          private val DARK = c(0xFF2B2F36)
+          private val BROWN = c(0xFF7A4B25)
+          private val GOLD = c(0xFFE0B040)
+          private val CYAN = c(0xFF30E0FF)
+          private val GLOW = c(0x6630E0FF)
+          private val RED = c(0xFFE04040)
+          private val OLIVE = c(0xFF55633A)
+          private val ORANGE = c(0xFFFF8C1A)
+          private val ORANGE_GLOW = c(0x66FF8C1A)
+          private val YELLOW = c(0xFFFFE066)
+          private val PURPLE = c(0xFFB070FF)
+          private val WHITE = c(0xFFF4F8FF)
+          private val GRAY = c(0xFF8A929C)
+
+          private fun rect(cx: Float, cy: Float, w: Float, h: Float, col: Int) = Poly(
+              floatArrayOf(cx - w / 2, cy - h / 2, cx + w / 2, cy - h / 2, cx + w / 2, cy + h / 2, cx - w / 2, cy + h / 2), col
+          )
+
+          private fun tri(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float, col: Int) =
+              Poly(floatArrayOf(x1, y1, x2, y2, x3, y3), col)
+
+          private fun quad(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float, x4: Float, y4: Float, col: Int) =
+              Poly(floatArrayOf(x1, y1, x2, y2, x3, y3, x4, y4), col)
+
+          private fun circle(cx: Float, cy: Float, r: Float, col: Int): Poly {
+              val a = FloatArray(32)
+              for (i in 0 until 16) {
+                  val t = (i * 2.0 * PI / 16.0)
+                  a[2 * i] = cx + (cos(t) * r).toFloat()
+                  a[2 * i + 1] = cy + (sin(t) * r).toFloat()
+              }
+              return Poly(a, col)
+          }
+
+          val CATEGORIES: List<Category> = listOf(
+              Category("Silahlar", c(0xFFE05050), listOf(
+                  Item("Tabanca", listOf(rect(0f, 0.95f, 0.14f, 0.6f, DARK), rect(0f, 0.5f, 0.22f, 0.5f, STEEL), rect(0f, -0.05f, 0.17f, 0.6f, BROWN)), 1.3f, YELLOW),
+                  Item("Tüfek", listOf(rect(0f, 1.55f, 0.08f, 1.0f, DARK), rect(0f, 0.6f, 0.2f, 1.0f, OLIVE), rect(0f, -0.3f, 0.18f, 0.6f, BROWN), rect(0.14f, 0.3f, 0.1f, 0.35f, DARK)), 2.1f, YELLOW),
+                  Item("Lazer", listOf(rect(0f, 0.55f, 0.26f, 0.8f, WHITE), rect(0f, 1.15f, 0.1f, 0.5f, CYAN), circle(0f, 0.7f, 0.07f, CYAN), rect(0f, -0.05f, 0.16f, 0.55f, DARK)), 1.4f, CYAN),
+                  Item("Roketatar", listOf(rect(0f, 0.9f, 0.3f, 1.8f, OLIVE), tri(-0.15f, 1.8f, 0.15f, 1.8f, 0f, 2.2f, RED), rect(0f, -0.2f, 0.18f, 0.5f, DARK)), 2.2f, ORANGE)
+              )),
+              Category("Kılıçlar", c(0xFF50A0FF), listOf(
+                  Item("Kılıç", listOf(tri(-0.09f, 1.9f, 0.09f, 1.9f, 0f, 2.2f, STEEL), rect(0f, 1.15f, 0.18f, 1.5f, STEEL), rect(0f, 0.35f, 0.7f, 0.1f, GOLD), rect(0f, 0f, 0.1f, 0.55f, BROWN), circle(0f, -0.3f, 0.07f, GOLD)), 2.2f, WHITE),
+                  Item("Işın Kılıcı", listOf(rect(0f, 1.25f, 0.28f, 1.9f, GLOW), rect(0f, 1.25f, 0.1f, 1.9f, WHITE), rect(0f, 0.15f, 0.12f, 0.5f, DARK), rect(0f, 0.4f, 0.16f, 0.06f, STEEL)), 2.2f, CYAN),
+                  Item("Balta", listOf(rect(0f, 0.7f, 0.1f, 2.0f, BROWN), quad(0.05f, 1.65f, 0.6f, 1.85f, 0.6f, 0.85f, 0.05f, 1.05f, STEEL), quad(-0.05f, 1.55f, -0.3f, 1.65f, -0.3f, 1.15f, -0.05f, 1.25f, GRAY)), 1.8f, WHITE),
+                  Item("Hançer", listOf(tri(-0.08f, 1.1f, 0.08f, 1.1f, 0f, 1.5f, STEEL), rect(0f, 0.8f, 0.16f, 0.6f, STEEL), rect(0f, 0.45f, 0.4f, 0.08f, GOLD), rect(0f, 0.1f, 0.09f, 0.5f, BROWN)), 1.5f, WHITE)
+              )),
+              Category("Aletler", c(0xFFFFB020), listOf(
+                  Item("Çekiç", listOf(rect(0f, 0.5f, 0.1f, 1.7f, BROWN), rect(0f, 1.4f, 0.55f, 0.35f, GRAY)), 1.6f, WHITE),
+                  Item("Kalkan", listOf(circle(0f, 0.9f, 0.7f, STEEL), circle(0f, 0.9f, 0.5f, RED), circle(0f, 0.9f, 0.22f, GOLD)), 1.6f, WHITE),
+                  Item("Fener", listOf(rect(0f, 0.5f, 0.14f, 1.2f, BROWN), tri(-0.25f, 1.1f, 0.25f, 1.1f, 0f, 2.0f, ORANGE), tri(-0.14f, 1.1f, 0.14f, 1.1f, 0f, 1.65f, YELLOW)), 2.0f, ORANGE),
+                  Item("Anahtar", listOf(rect(0f, 0.6f, 0.12f, 1.6f, STEEL), circle(0f, 1.5f, 0.26f, STEEL), circle(0f, 0f, 0.14f, STEEL)), 1.8f, WHITE)
+              )),
+              Category("Fantezi", c(0xFFB070FF), listOf(
+                  Item("Değnek", listOf(rect(0f, 0.8f, 0.07f, 1.8f, DARK), tri(-0.15f, 1.85f, 0.15f, 1.85f, 0f, 2.2f, GOLD), tri(-0.15f, 2.07f, 0.15f, 2.07f, 0f, 1.75f, GOLD)), 2.2f, PURPLE),
+                  Item("Asa", listOf(rect(0f, 0.9f, 0.09f, 2.2f, BROWN), circle(0f, 2.0f, 0.2f, PURPLE), circle(0f, 2.0f, 0.1f, WHITE)), 2.2f, PURPLE),
+                  Item("Ateş Topu", listOf(circle(0f, 1.0f, 0.6f, ORANGE_GLOW), circle(0f, 1.0f, 0.4f, ORANGE), circle(0f, 1.0f, 0.2f, YELLOW)), 1.6f, ORANGE),
+                  Item("Kristal", listOf(quad(0f, 1.9f, 0.35f, 1.2f, 0f, 0.5f, -0.35f, 1.2f, CYAN), quad(0f, 1.9f, 0.12f, 1.2f, 0f, 0.5f, -0.12f, 1.2f, WHITE)), 1.9f, CYAN)
+              ))
+          )
+          EOFKT
+          mkdir -p app/src/main/java/com/vrbox/arhands
+          cat > app/src/main/java/com/vrbox/arhands/ArRenderer.kt <<'EOFKT'
+          package com.vrbox.arhands
+
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.opengl.GLES11Ext
+          import android.opengl.GLES20
+          import android.opengl.GLSurfaceView
+          import android.opengl.GLUtils
+          import android.os.SystemClock
+          import com.google.ar.core.Coordinates2d
+          import com.google.ar.core.Frame
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.nio.FloatBuffer
+          import javax.microedition.khronos.egl.EGLConfig
+          import javax.microedition.khronos.opengles.GL10
+          import kotlin.math.PI
+          import kotlin.math.ceil
+          import kotlin.math.cos
+          import kotlin.math.hypot
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.sin
+
+          internal class Hand(val p: FloatArray) {
+              val px: Float
+              val py: Float
+              val dx: Float
+              val dy: Float
+              val len: Float
+
+              init {
+                  px = (x(0) + x(5) + x(9) + x(13) + x(17)) / 5f
+                  py = (y(0) + y(5) + y(9) + y(13) + y(17)) / 5f
+                  val vx = x(9) - x(0)
+                  val vy = y(9) - y(0)
+                  val l = max(hypot(vx, vy), 1e-4f)
+                  dx = vx / l
+                  dy = vy / l
+                  len = l
+              }
+
+              fun x(i: Int): Float = p[2 * i]
+              fun y(i: Int): Float = p[2 * i + 1]
+          }
+
+          internal class Btn {
+              var x = 0f
+              var y = 0f
+              var w = 0f
+              var h = 0f
+              fun set(a: Float, b: Float, c: Float, d: Float) { x = a; y = b; w = c; h = d }
+              fun hit(a: Float, b: Float): Boolean = a >= x && a <= x + w && b >= y && b <= y + h
+          }
+
+          class ArRenderer(private val act: MainActivity) : GLSurfaceView.Renderer {
+              val tracker = HandTracker(act.applicationContext)
+
+              private var w = 1
+              private var h = 1
+              private var ew = 1
+              private var aspect = 1f          // bir göz görüntüsünün genişlik/yükseklik oranı
+              private var ox = 0f               // yatay paralaks kayması (göz birimi)
+              private var geomDirty = true
+              private var texSet = false
+
+              private var bgTex = 0
+              private var bgProg = 0
+              private var bgPos = 0
+              private var bgUv = 0
+              private var bgSamp = 0
+              private var solProg = 0
+              private var solPos = 0
+              private var solCol = 0
+              private var texProg = 0
+              private var tPos = 0
+              private var tUv = 0
+              private var tCol = 0
+              private var tSamp = 0
+
+              private val quad = fbuf(8)
+              private val uv = fbuf(8)
+              private val vb = fbuf(256)
+              private val tvb = fbuf(8)
+              private val tuv = fbuf(8)
+              private val sc = FloatArray(64)
+              private val texCache = HashMap<String, Pair<Int, Float>>()
+
+              private val hands = ArrayList<Hand>()
+              private val tabs = Array(4) { Btn() }
+              private val cards = Array(4) { Btn() }
+              private var panelX = 0f
+              private var panelW = 0f
+
+              private var cat = 0
+              private var held: Item? = null
+              private var pinching = false
+              private var flashUntil = 0L
+              private var hasCursor = false
+              private var curX = 0f
+              private var curY = 0f
+
+              @Volatile private var tapPending = false
+              @Volatile private var tapX = 0f
+              @Volatile private var tapY = 0f
+
+              fun onTap(x: Float, y: Float) {
+                  val half = max(ew, 1).toFloat()
+                  tapX = (x % half) / max(h, 1)
+                  tapY = y / max(h, 1)
+                  tapPending = true
+              }
+
+              private fun fbuf(n: Int): FloatBuffer =
+                  ByteBuffer.allocateDirect(n * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+
+              private fun program(vs: String, fs: String): Int {
+                  fun sh(type: Int, src: String): Int {
+                      val id = GLES20.glCreateShader(type)
+                      GLES20.glShaderSource(id, src)
+                      GLES20.glCompileShader(id)
+                      return id
+                  }
+                  val p = GLES20.glCreateProgram()
+                  GLES20.glAttachShader(p, sh(GLES20.GL_VERTEX_SHADER, vs))
+                  GLES20.glAttachShader(p, sh(GLES20.GL_FRAGMENT_SHADER, fs))
+                  GLES20.glLinkProgram(p)
+                  return p
+              }
+
+              override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+                  GLES20.glClearColor(0f, 0f, 0f, 1f)
+                  val t = IntArray(1)
+                  GLES20.glGenTextures(1, t, 0)
+                  bgTex = t[0]
+                  GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, bgTex)
+                  GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                  GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                  GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                  GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+
+                  bgProg = program(
+                      "attribute vec2 aPos; attribute vec2 aUv; varying vec2 vUv; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); vUv = aUv; }",
+                      "#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 vUv; uniform samplerExternalOES uTex; void main(){ gl_FragColor = texture2D(uTex, vUv); }"
+                  )
+                  bgPos = GLES20.glGetAttribLocation(bgProg, "aPos")
+                  bgUv = GLES20.glGetAttribLocation(bgProg, "aUv")
+                  bgSamp = GLES20.glGetUniformLocation(bgProg, "uTex")
+
+                  solProg = program(
+                      "attribute vec2 aPos; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }",
+                      "precision mediump float; uniform vec4 uColor; void main(){ gl_FragColor = uColor; }"
+                  )
+                  solPos = GLES20.glGetAttribLocation(solProg, "aPos")
+                  solCol = GLES20.glGetUniformLocation(solProg, "uColor")
+
+                  texProg = program(
+                      "attribute vec2 aPos; attribute vec2 aUv; varying vec2 vUv; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); vUv = aUv; }",
+                      "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; uniform vec4 uColor; void main(){ gl_FragColor = vec4(uColor.rgb, uColor.a * texture2D(uTex, vUv).a); }"
+                  )
+                  tPos = GLES20.glGetAttribLocation(texProg, "aPos")
+                  tUv = GLES20.glGetAttribLocation(texProg, "aUv")
+                  tCol = GLES20.glGetUniformLocation(texProg, "uColor")
+                  tSamp = GLES20.glGetUniformLocation(texProg, "uTex")
+
+                  quad.clear()
+                  quad.put(floatArrayOf(-1f, -1f, -1f, 1f, 1f, -1f, 1f, 1f))
+                  quad.position(0)
+                  uv.clear()
+                  uv.put(floatArrayOf(0f, 1f, 0f, 0f, 1f, 1f, 1f, 0f))
+                  uv.position(0)
+
+                  texSet = false
+                  geomDirty = true
+                  texCache.clear()
+              }
+
+              override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+                  w = max(width, 2)
+                  h = max(height, 1)
+                  ew = w / 2
+                  aspect = ew.toFloat() / h.toFloat()
+                  geomDirty = true
+              }
+
+              @Suppress("DEPRECATION")
+              override fun onDrawFrame(gl: GL10?) {
+                  GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                  val s = act.session ?: return
+                  if (!texSet) {
+                      s.setCameraTextureName(bgTex)
+                      texSet = true
+                  }
+                  if (geomDirty) {
+                      val rot = act.windowManager.defaultDisplay.rotation
+                      s.setDisplayGeometry(rot, ew, h)
+                      geomDirty = false
+                  }
+                  val frame: Frame = try {
+                      s.update()
+                  } catch (e: Exception) {
+                      return
+                  }
+                  if (frame.hasDisplayGeometryChanged()) {
+                      quad.position(0)
+                      uv.position(0)
+                      frame.transformCoordinates2d(
+                          Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES, quad,
+                          Coordinates2d.TEXTURE_NORMALIZED, uv
+                      )
+                      quad.position(0)
+                      uv.position(0)
+                  }
+
+                  feedTracker(frame)
+                  updateLogic(frame)
+
+                  GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+                  for (eye in 0..1) {
+                      GLES20.glViewport(eye * ew, 0, ew, h)
+                      drawBackground()
+                      GLES20.glEnable(GLES20.GL_BLEND)
+                      GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                      ox = 0f
+                      drawHands()
+                      ox = if (eye == 0) 0.012f else -0.012f
+                      drawMenu()
+                      ox = 0f
+                      drawCursor()
+                      GLES20.glDisable(GLES20.GL_BLEND)
+                  }
+              }
+
+              private fun feedTracker(frame: Frame) {
+                  if (!tracker.idle()) return
+                  var img: android.media.Image? = null
+                  try {
+                      val got: android.media.Image = frame.acquireCameraImage()
+                      img = got
+                      val bmp = yuvToBitmap(got)
+                      if (bmp != null) tracker.submit(bmp)
+                  } catch (e: Exception) {
+                      // kare henüz hazır değil
+                  } finally {
+                      img?.close()
+                  }
+              }
+
+              private fun updateLogic(frame: Frame) {
+                  layout()
+                  hands.clear()
+                  if (SystemClock.uptimeMillis() - tracker.lastMs < 400L) {
+                      for (r in tracker.hands) {
+                          if (r.size < 42) continue
+                          val o = FloatArray(42)
+                          frame.transformCoordinates2d(Coordinates2d.IMAGE_NORMALIZED, r, Coordinates2d.VIEW_NORMALIZED, o)
+                          for (i in 0 until 21) o[2 * i] = o[2 * i] * aspect
+                          hands.add(Hand(o))
+                      }
+                  }
+                  val prim = hands.firstOrNull()
+                  var click = false
+                  var clickX = 0f
+                  var clickY = 0f
+                  if (prim != null) {
+                      val ratio = hypot(prim.x(4) - prim.x(8), prim.y(4) - prim.y(8)) / prim.len
+                      if (!pinching && ratio < 0.35f) {
+                          pinching = true
+                          click = true
+                      } else if (pinching && ratio > 0.55f) {
+                          pinching = false
+                      }
+                      curX = prim.x(8)
+                      curY = prim.y(8)
+                      hasCursor = true
+                      clickX = curX
+                      clickY = curY
+                  } else {
+                      pinching = false
+                      hasCursor = false
+                  }
+                  if (tapPending) {
+                      tapPending = false
+                      click = true
+                      clickX = tapX
+                      clickY = tapY
+                  }
+                  if (click) onClick(clickX, clickY)
+              }
+
+              private fun layout() {
+                  val pw = min(aspect * 0.94f, 1.2f)
+                  val x0 = (aspect - pw) / 2f
+                  val gap = 0.02f
+                  val cw = (pw - 3 * gap) / 4f
+                  for (i in 0 until 4) {
+                      tabs[i].set(x0 + i * (cw + gap), 0.60f, cw, 0.09f)
+                      cards[i].set(x0 + i * (cw + gap), 0.705f, cw, 0.255f)
+                  }
+                  panelX = x0 - 0.02f
+                  panelW = pw + 0.04f
+              }
+
+              private fun onClick(x: Float, y: Float) {
+                  for (i in tabs.indices) {
+                      if (tabs[i].hit(x, y)) { cat = i; return }
+                  }
+                  val items = CATEGORIES[cat].items
+                  for (i in cards.indices) {
+                      if (i < items.size && cards[i].hit(x, y)) {
+                          val chosen = items[i]
+                          held = if (held === chosen) null else chosen
+                          return
+                      }
+                  }
+                  if (held != null) flashUntil = SystemClock.uptimeMillis() + 160L
+              }
+
+              // ---------- çizim yardımcıları ----------
+
+              private fun setColor(loc: Int, col: Int) {
+                  GLES20.glUniform4f(
+                      loc,
+                      ((col shr 16) and 255) / 255f,
+                      ((col shr 8) and 255) / 255f,
+                      (col and 255) / 255f,
+                      ((col ushr 24) and 255) / 255f
+                  )
+              }
+
+              private fun drawBackground() {
+                  GLES20.glDisable(GLES20.GL_BLEND)
+                  GLES20.glUseProgram(bgProg)
+                  GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                  GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, bgTex)
+                  GLES20.glUniform1i(bgSamp, 0)
+                  quad.position(0)
+                  uv.position(0)
+                  GLES20.glVertexAttribPointer(bgPos, 2, GLES20.GL_FLOAT, false, 0, quad)
+                  GLES20.glVertexAttribPointer(bgUv, 2, GLES20.GL_FLOAT, false, 0, uv)
+                  GLES20.glEnableVertexAttribArray(bgPos)
+                  GLES20.glEnableVertexAttribArray(bgUv)
+                  GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                  GLES20.glDisableVertexAttribArray(bgPos)
+                  GLES20.glDisableVertexAttribArray(bgUv)
+              }
+
+              private fun drawPts(p: FloatArray, n: Int, col: Int) {
+                  vb.clear()
+                  for (i in 0 until n) {
+                      vb.put((p[2 * i] + ox) / aspect * 2f - 1f)
+                      vb.put(1f - 2f * p[2 * i + 1])
+                  }
+                  vb.position(0)
+                  GLES20.glUseProgram(solProg)
+                  setColor(solCol, col)
+                  GLES20.glEnableVertexAttribArray(solPos)
+                  GLES20.glVertexAttribPointer(solPos, 2, GLES20.GL_FLOAT, false, 0, vb)
+                  GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN, 0, n)
+                  GLES20.glDisableVertexAttribArray(solPos)
+              }
+
+              private fun fill(x: Float, y: Float, wd: Float, ht: Float, col: Int) {
+                  sc[0] = x; sc[1] = y
+                  sc[2] = x + wd; sc[3] = y
+                  sc[4] = x + wd; sc[5] = y + ht
+                  sc[6] = x; sc[7] = y + ht
+                  drawPts(sc, 4, col)
+              }
+
+              private fun disc(cx: Float, cy: Float, r: Float, col: Int) {
+                  for (i in 0 until 16) {
+                      val a = (i * 2.0 * PI / 16.0).toFloat()
+                      sc[2 * i] = cx + cos(a) * r
+                      sc[2 * i + 1] = cy + sin(a) * r
+                  }
+                  drawPts(sc, 16, col)
+              }
+
+              private fun line(x1: Float, y1: Float, x2: Float, y2: Float, th: Float, col: Int) {
+                  val dx = x2 - x1
+                  val dy = y2 - y1
+                  val l = hypot(dx, dy)
+                  if (l < 1e-5f) return
+                  val nx = -dy / l * th / 2f
+                  val ny = dx / l * th / 2f
+                  sc[0] = x1 + nx; sc[1] = y1 + ny
+                  sc[2] = x2 + nx; sc[3] = y2 + ny
+                  sc[4] = x2 - nx; sc[5] = y2 - ny
+                  sc[6] = x1 - nx; sc[7] = y1 - ny
+                  drawPts(sc, 4, col)
+              }
+
+              private fun makeText(s: String): Pair<Int, Float> {
+                  val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                  paint.color = Color.WHITE
+                  paint.textSize = 44f
+                  val wpx = ceil(paint.measureText(s)).toInt() + 8
+                  val bmp = Bitmap.createBitmap(wpx, 60, Bitmap.Config.ARGB_8888)
+                  Canvas(bmp).drawText(s, 4f, 44f, paint)
+                  val t = IntArray(1)
+                  GLES20.glGenTextures(1, t, 0)
+                  GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, t[0])
+                  GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                  GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                  GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                  GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                  GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+                  bmp.recycle()
+                  return Pair(t[0], wpx / 60f)
+              }
+
+              private fun drawText(s: String, cx: Float, cy: Float, hgt: Float, maxW: Float, col: Int) {
+                  var e = texCache[s]
+                  if (e == null) {
+                      e = makeText(s)
+                      texCache[s] = e
+                  }
+                  val ht = min(hgt, maxW / e.second)
+                  val wd = ht * e.second
+                  val x0 = cx - wd / 2f
+                  val y0 = cy - ht / 2f
+                  tvb.clear()
+                  val xs = floatArrayOf(x0, x0 + wd, x0, x0 + wd)
+                  val ys = floatArrayOf(y0, y0, y0 + ht, y0 + ht)
+                  for (i in 0 until 4) {
+                      tvb.put((xs[i] + ox) / aspect * 2f - 1f)
+                      tvb.put(1f - 2f * ys[i])
+                  }
+                  tvb.position(0)
+                  tuv.clear()
+                  tuv.put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f))
+                  tuv.position(0)
+                  GLES20.glUseProgram(texProg)
+                  GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                  GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, e.first)
+                  GLES20.glUniform1i(tSamp, 0)
+                  setColor(tCol, col)
+                  GLES20.glVertexAttribPointer(tPos, 2, GLES20.GL_FLOAT, false, 0, tvb)
+                  GLES20.glVertexAttribPointer(tUv, 2, GLES20.GL_FLOAT, false, 0, tuv)
+                  GLES20.glEnableVertexAttribArray(tPos)
+                  GLES20.glEnableVertexAttribArray(tUv)
+                  GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                  GLES20.glDisableVertexAttribArray(tPos)
+                  GLES20.glDisableVertexAttribArray(tUv)
+              }
+
+              private fun drawItem(item: Item, px: Float, py: Float, dx: Float, dy: Float, scale: Float) {
+                  for (part in item.parts) {
+                      val n = part.pts.size / 2
+                      for (i in 0 until n) {
+                          val lx = part.pts[2 * i]
+                          val ly = part.pts[2 * i + 1]
+                          sc[2 * i] = px + (-dy * lx + dx * ly) * scale
+                          sc[2 * i + 1] = py + (dx * lx + dy * ly) * scale
+                      }
+                      drawPts(sc, n, part.color)
+                  }
+              }
+
+              private val bones = intArrayOf(
+                  0, 1, 1, 2, 2, 3, 3, 4, 0, 5, 5, 6, 6, 7, 7, 8, 5, 9, 9, 10, 10, 11, 11, 12,
+                  9, 13, 13, 14, 14, 15, 15, 16, 13, 17, 17, 18, 18, 19, 19, 20, 0, 17
+              )
+
+              private fun drawHands() {
+                  for (hd in hands) {
+                      var i = 0
+                      while (i < bones.size) {
+                          val a = bones[i]
+                          val b = bones[i + 1]
+                          line(hd.x(a), hd.y(a), hd.x(b), hd.y(b), 0.006f, 0x8800E5FF.toInt())
+                          i += 2
+                      }
+                      for (j in 0 until 21) disc(hd.x(j), hd.y(j), 0.008f, 0xFFFFFFFF.toInt())
+                  }
+                  val prim = hands.firstOrNull() ?: return
+                  val item = held ?: return
+                  val scale = prim.len * 1.6f
+                  drawItem(item, prim.px, prim.py, prim.dx, prim.dy, scale)
+                  if (SystemClock.uptimeMillis() < flashUntil) {
+                      val tx = prim.px + prim.dx * item.tip * scale
+                      val ty = prim.py + prim.dy * item.tip * scale
+                      disc(tx, ty, 0.07f, (item.flash and 0x00FFFFFF) or 0x66000000)
+                      disc(tx, ty, 0.04f, item.flash)
+                      disc(tx, ty, 0.02f, 0xFFFFFFFF.toInt())
+                  }
+              }
+
+              private fun drawMenu() {
+                  val ci = CATEGORIES[cat]
+                  // cam gibi yarı saydam panel
+                  fill(panelX, 0.575f, panelW, 0.40f, 0xB0141420.toInt())
+                  fill(panelX, 0.575f, panelW, 0.004f, 0x66FFFFFF)
+
+                  // durum satırı (üstte, sabit)
+                  val status = when {
+                      tracker.error != null -> tracker.error!!
+                      held != null -> "Elinde: " + held!!.name + " - çimdikle: kullan"
+                      hands.isEmpty() -> "Elini kameraya göster"
+                      else -> "İşaret parmağı = imleç, çimdik = seç"
+                  }
+                  fill(aspect / 2f - 0.42f, 0.03f, 0.84f, 0.06f, 0x88101018.toInt())
+                  drawText(status, aspect / 2f, 0.06f, 0.04f, 0.8f, 0xFFFFFFFF.toInt())
+
+                  for (i in tabs.indices) {
+                      val b = tabs[i]
+                      val cc = CATEGORIES[i]
+                      val sel = i == cat
+                      val hover = hasCursor && b.hit(curX, curY)
+                      val base = (cc.color and 0x00FFFFFF)
+                      val alpha = if (sel) 0xE0 else if (hover) 0xA0 else 0x50
+                      fill(b.x, b.y, b.w, b.h, (alpha shl 24) or base)
+                      drawText(cc.name, b.x + b.w / 2f, b.y + b.h / 2f, 0.045f, b.w * 0.92f, 0xFFFFFFFF.toInt())
+                  }
+                  for (i in cards.indices) {
+                      if (i >= ci.items.size) continue
+                      val b = cards[i]
+                      val item = ci.items[i]
+                      val isHeld = held === item
+                      val hover = hasCursor && b.hit(curX, curY)
+                      if (isHeld) fill(b.x - 0.008f, b.y - 0.008f, b.w + 0.016f, b.h + 0.016f, 0xFF4CD964.toInt())
+                      fill(b.x, b.y, b.w, b.h, if (hover) 0xE03A3A52.toInt() else 0xC0222233.toInt())
+                      val l = 0.063f
+                      drawItem(item, b.x + b.w / 2f, b.y + 0.01f + 0.17f - 0.5f * l, 0f, -1f, l)
+                      drawText(item.name, b.x + b.w / 2f, b.y + b.h - 0.04f, 0.038f, b.w * 0.92f, 0xFFFFFFFF.toInt())
+                  }
+              }
+
+              private fun drawCursor() {
+                  if (!hasCursor) return
+                  disc(curX, curY, 0.024f, 0xFFFFFFFF.toInt())
+                  disc(curX, curY, 0.015f, if (pinching) 0xFFFFD60A.toInt() else 0xFF0A84FF.toInt())
+              }
+          }
+          EOFKT
+          find app -type f | sort
+
+      - name: SDK lisanslarini kabul et
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Download hand landmarker model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -L --fail -o app/src/main/assets/hand_landmarker.task \
+            https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+          ls -l app/src/main/assets
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          gradle assembleDebug --console=plain 2>&1 | tee build.log
+
+      - name: Hata ozeti
+        if: failure()
+        run: |
+          grep -n -A8 -E "What went wrong|^e: |error:" build.log | head -80 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrbox-ar-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
