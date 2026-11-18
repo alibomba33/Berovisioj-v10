@@ -26,7 +26,14 @@ jobs:
           gradle-version: 8.9
 
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        shell: bash
+        run: |
+          gradle assembleDebug --console=plain 2>&1 | tee build.log
+
+      - name: Hata özeti
+        if: failure()
+        run: |
+          grep -n -A6 -E "What went wrong|^e: |error:" build.log | head -60 || true
 
       - uses: actions/upload-artifact@v4
         with:
