@@ -14,6 +14,39 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Gradle dosyalarini hazirla
+        run: |
+          rm -f settings.gradle build.gradle app/build.gradle
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VRBoxAR"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          printf 'org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8\nandroid.useAndroidX=true\nandroid.nonTransitiveRClass=true\n' > gradle.properties
+          find . -type f -not -path './.git/*' | sort > files.txt
+          head -80 files.txt
+
+      - name: SDK lisanslarini kabul et
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
       - name: Download hand landmarker model
         run: |
           mkdir -p app/src/main/assets
@@ -30,10 +63,10 @@ jobs:
         run: |
           gradle assembleDebug --console=plain 2>&1 | tee build.log
 
-      - name: Hata özeti
+      - name: Hata ozeti
         if: failure()
         run: |
-          grep -n -A6 -E "What went wrong|^e: |error:" build.log | head -60 || true
+          grep -n -A8 -E "What went wrong|^e: |error:" build.log | head -80 || true
 
       - uses: actions/upload-artifact@v4
         with:
